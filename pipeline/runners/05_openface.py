@@ -28,9 +28,10 @@ from rich.logging import RichHandler
 
 from pipeline import orchestrator
 from pipeline.core import openface
-from pipeline.helpers import cli, utils
+from pipeline.helpers import cli, utils, db
 from pipeline.helpers.timer import Timer
 from pipeline.models.interview_roles import InterviewRole
+from pipeline.models.openface import Openface
 
 MODULE_NAME = "openface"
 INSTANCE_NAME = MODULE_NAME
@@ -126,7 +127,31 @@ if __name__ == "__main__":
         if not video_stream_path.exists():
             logger.error(f"Video stream path does not exist: {video_stream_path}")
             logger.error(f"video_path: {video_path}")
-            sys.exit(1)
+            logger.error(f"This likely means the file was cleaned up by the exporter before OpenFace processing completed.")
+
+            if cli.confirm_action("Skip this stream and continue processing?"):
+                logger.warning(f"Skipping stream for interview: {interview_name}")
+
+                # Create a skip record in the openface table so this stream won't be selected again
+                # Use a placeholder path that indicates it was skipped
+                skip_path = video_stream_path.parent / f"{video_stream_path.stem}_SKIPPED_MISSING_FILE"
+                skip_record = Openface(
+                    vs_path=video_stream_path,
+                    ir_role=interview_role,
+                    video_path=video_path,
+                    of_processed_path=skip_path,
+                    of_process_time=0.0,
+                    of_overlay_provess_time=0.0
+                )
+
+                query = skip_record.to_sql()
+                db.execute_queries(config_file=config_file, queries=[query])
+                logger.info(f"Created skip record for stream: {video_stream_path}")
+
+                continue
+            else:
+                logger.error("Exiting as requested by user.")
+                sys.exit(1)
 
         openface_path = openface.construct_output_path(
             config_file=config_file, video_path=video_stream_path

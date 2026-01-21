@@ -18,6 +18,14 @@ scratch/
 
 # config
 config.ini
+predictor.config.ini
+
+# temp files
+temp_root/
+
+# large binary files
+feature-extraction.sif
+*.sif
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

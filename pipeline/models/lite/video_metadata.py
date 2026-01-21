@@ -60,6 +60,9 @@ class VideoMetadata:
         Args:
             config_file (Path): Path to the config file.
             interview_name (str): Name of the interview.
+
+        REVERT NOTE (2026-01-05): Added fallback to query raw video file metadata
+        if stream metadata is not found. To revert, remove the fallback query section.
         """
         vs_path = core.get_interview_stream(
             config_file=config_file, interview_name=interview_name, role=role
@@ -76,8 +79,24 @@ class VideoMetadata:
 
         resolution_df = db.execute_sql(config_file=config_file, query=sql_query)
 
+        # FALLBACK: If stream metadata not found, try querying the raw decrypted video file
         if resolution_df.empty:
-            raise ValueError(f"No resolution found for {vs_path}")
+            # Try to get metadata from the original decrypted video file
+            fallback_query = f"""
+                SELECT fmv_width, fmv_height
+                FROM ffprobe_metadata_video
+                INNER JOIN decrypted_files ON ffprobe_metadata_video.fmv_source_path = decrypted_files.destination_path
+                INNER JOIN interview_files ON decrypted_files.source_path = interview_files.interview_file
+                INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                INNER JOIN interviews ON interview_parts.interview_name = interviews.interview_name
+                WHERE interviews.interview_name = '{interview_name}'
+                    AND interview_files.interview_file_tags LIKE '%video%'
+                LIMIT 1
+            """
+            resolution_df = db.execute_sql(config_file=config_file, query=fallback_query)
+
+            if resolution_df.empty:
+                raise ValueError(f"No resolution found for {vs_path} (tried fallback to raw video)")
 
         width = resolution_df.iloc[0]["fmv_width"]
         height = resolution_df.iloc[0]["fmv_height"]

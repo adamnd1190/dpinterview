@@ -5,6 +5,7 @@ Helper functions for interacting with a PostgreSQL database.
 import json
 import logging
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Literal, Optional
@@ -17,6 +18,15 @@ from pipeline import orchestrator
 from pipeline.helpers import cli, utils
 
 logger = logging.getLogger(__name__)
+
+# Suppress pandas UserWarning about SQLAlchemy 2.x compatibility
+# This is a known issue with pandas + SQLAlchemy 2.x when using raw connections
+warnings.filterwarnings(
+    "ignore",
+    message="pandas only supports SQLAlchemy connectable.*",
+    category=UserWarning,
+    module="pandas"
+)
 
 
 def handle_null(query: str) -> str:
@@ -259,9 +269,17 @@ def execute_sql(
     if debug:
         logger.debug(f"Executing query: {query}")
 
-    df = pd.read_sql(query, engine)
-
-    engine.dispose()
+    # Work around SQLAlchemy 2.x + Pandas incompatibility
+    # Use raw connection instead of engine
+    raw_conn = engine.raw_connection()
+    try:
+        # Suppress the pandas UserWarning about SQLAlchemy compatibility
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            df = pd.read_sql_query(query, raw_conn)
+    finally:
+        raw_conn.close()
+        engine.dispose()
 
     return df
 

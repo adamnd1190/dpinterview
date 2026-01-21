@@ -88,6 +88,9 @@ class ExportedAsset:
     def to_sql(self) -> str:
         """
         Returns SQL query to insert the object into the `exported_assets` table.
+        Uses ON CONFLICT UPDATE to handle re-exports of the same asset.
+
+        REVERT NOTE (2026-01-05): To revert, remove the "ON CONFLICT..." clause below.
         """
         sql_query = f"""
         INSERT INTO exported_assets (
@@ -106,7 +109,14 @@ class ExportedAsset:
             '{self.asset_tag}',
             '{self.asset_destination}',
             '{self.aset_exported_timestamp}'
-        );
+        )
+        ON CONFLICT (asset_path) DO UPDATE SET
+            interview_name = EXCLUDED.interview_name,
+            asset_type = EXCLUDED.asset_type,
+            asset_export_type = EXCLUDED.asset_export_type,
+            asset_tag = EXCLUDED.asset_tag,
+            asset_destination = EXCLUDED.asset_destination,
+            aset_exported_timestamp = EXCLUDED.aset_exported_timestamp;
         """
 
         return sql_query

@@ -286,7 +286,7 @@ def fetch_interviews(
     interview_parts: List[InterviewParts] = []
     for interview_type in interview_types:
         interview_type_path = (
-            study_path / subject_id / f"{interview_type.value}_interview" / "raw"
+            study_path / subject_id / f"{interview_type.value}" / "raw"
         )
 
         if not interview_type_path.exists():

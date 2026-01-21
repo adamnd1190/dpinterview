@@ -14,8 +14,8 @@ class InterviewType(Enum):
     Enumerates the types of interviews.
     """
 
-    ONSITE = "onsite"
-    OFFSITE = "offsite"
+    ONSITE = "onsite_interview"
+    OFFSITE = "offsite_interview"
     OPEN = "open"
     PSYCHS = "psychs"
 

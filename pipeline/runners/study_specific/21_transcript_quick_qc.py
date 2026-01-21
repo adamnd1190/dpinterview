@@ -30,7 +30,7 @@ from pipeline.core import transcript_quick_qc
 from pipeline.helpers import cli, utils
 from pipeline.helpers.timer import Timer
 
-MODULE_NAME = "pipeline.runners.study_specific.bls.21_transcript_quick_qc"
+MODULE_NAME = "pipeline.runners.study_specific.predictor.21_transcript_quick_qc"
 
 logger = logging.getLogger(MODULE_NAME)
 logargs = {

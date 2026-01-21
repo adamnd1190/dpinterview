@@ -11,7 +11,50 @@ from pipeline.models.decrypted_files import DecryptedFile
 
 logger = logging.getLogger(__name__)
 
-INTERVIEWS_TO_FETCH = "offsite"
+INTERVIEWS_TO_FETCH = ['onsite_interview', 'offsite_interview']
+
+
+# def get_file_to_decrypt(
+#     config_file: Path, study_id: str
+# ) -> Optional[Tuple[str, str, str]]:
+#     """
+#     Retrieves a file to decrypt from the database.
+
+#     Args:
+#         config_file (Path): The path to the config file.
+
+#     Returns:
+#         Optional[Tuple[str, str, str]]: A tuple containing the path to the file to decrypt,
+#             the interview type, and the interview name.
+#     """
+
+#     query = f"""
+#     SELECT interview_file, interview_type, interview_name
+#     FROM interview_files
+#     LEFT join interview_parts USING(interview_path)
+#     LEFT JOIN interviews USING(interview_name)
+#     WHERE interviews.study_id = '{study_id}' AND
+#         interview_parts.is_primary IS TRUE AND
+#         interview_files.interview_file_tags LIKE '%%video%%' AND
+#         interview_files.interview_file NOT IN (
+#             SELECT source_path FROM decrypted_files
+#         ) AND interview_files.ignored = FALSE AND
+#         interviews.interview_type IN {tuple(INTERVIEWS_TO_FETCH)} AND
+#         interview_parts.is_duplicate is FALSE
+#     ORDER BY RANDOM()
+#     LIMIT 1
+#     """
+
+#     df = db.execute_sql(config_file=config_file, query=query)
+
+#     if df.empty:
+#         return None
+
+#     file_to_decrypt = df["interview_file"].iloc[0]
+#     interview_type = df["interview_type"].iloc[0]
+#     interview_name = df["interview_name"].iloc[0]
+
+#     return file_to_decrypt, interview_type, interview_name
 
 
 def get_file_to_decrypt(
@@ -19,16 +62,11 @@ def get_file_to_decrypt(
 ) -> Optional[Tuple[str, str, str]]:
     """
     Retrieves a file to decrypt from the database.
-
-    Args:
-        config_file (Path): The path to the config file.
-
-    Returns:
-        Optional[Tuple[str, str, str]]: A tuple containing the path to the file to decrypt,
-            the interview type, and the interview name.
+    Prioritizes _gvo_ (gallery view) files for offsite interviews.
     """
 
-    query = f"""
+    # FIRST: Try to get _gvo_ files (preferred for offsite/Zoom)
+    query_gvo = f"""
     SELECT interview_file, interview_type, interview_name
     FROM interview_files
     LEFT join interview_parts USING(interview_path)
@@ -36,16 +74,38 @@ def get_file_to_decrypt(
     WHERE interviews.study_id = '{study_id}' AND
         interview_parts.is_primary IS TRUE AND
         interview_files.interview_file_tags LIKE '%%video%%' AND
+        interview_files.interview_file LIKE '%%_gvo_%%' AND
         interview_files.interview_file NOT IN (
             SELECT source_path FROM decrypted_files
         ) AND interview_files.ignored = FALSE AND
-        interviews.interview_type = '{INTERVIEWS_TO_FETCH}' AND
+        interviews.interview_type IN {tuple(INTERVIEWS_TO_FETCH)} AND
         interview_parts.is_duplicate is FALSE
     ORDER BY RANDOM()
     LIMIT 1
     """
 
-    df = db.execute_sql(config_file=config_file, query=query)
+    df = db.execute_sql(config_file=config_file, query=query_gvo)
+    
+    # SECOND: If no _gvo_ found, fall back to any video
+    if df.empty:
+        query = f"""
+        SELECT interview_file, interview_type, interview_name
+        FROM interview_files
+        LEFT join interview_parts USING(interview_path)
+        LEFT JOIN interviews USING(interview_name)
+        WHERE interviews.study_id = '{study_id}' AND
+            interview_parts.is_primary IS TRUE AND
+            interview_files.interview_file_tags LIKE '%%video%%' AND
+            interview_files.interview_file NOT IN (
+                SELECT source_path FROM decrypted_files
+            ) AND interview_files.ignored = FALSE AND
+            interviews.interview_type IN {tuple(INTERVIEWS_TO_FETCH)} AND
+            interview_parts.is_duplicate is FALSE
+        ORDER BY RANDOM()
+        LIMIT 1
+        """
+        
+        df = db.execute_sql(config_file=config_file, query=query)
 
     if df.empty:
         return None
@@ -55,7 +115,6 @@ def get_file_to_decrypt(
     interview_name = df["interview_name"].iloc[0]
 
     return file_to_decrypt, interview_type, interview_name
-
 
 # fetch_audio also points here
 def construct_dest_dir(
@@ -81,7 +140,7 @@ def construct_dest_dir(
         "PROTECTED",
         study_id,
         participant_id,
-        f"{interview_type}_interview",
+        f"{interview_type}",
         "processed",
         "decrypted",
     )

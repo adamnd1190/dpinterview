@@ -143,15 +143,24 @@ def generate_report(
 
         console.log("Starting report generation...")
 
+        # Calculate duration from subject data, fallback to interviewer if subject is empty
         min_timestamp = of_pt_session["timestamp"].min()
         max_timestamp = of_pt_session["timestamp"].max()
         duration = max_timestamp - min_timestamp
 
-        # Check if the duration is NaN
+        # If subject data is empty (duration is NaN), use interviewer data for timing
         if np.isnan(duration):
-            message = "Skipping report generation. Duration is NaN."
-            console.log(message)
-            return message
+            if interview_metadata.has_interviewer_stream and not of_int_session.empty:
+                console.log("Subject data empty, using interviewer timestamps for duration")
+                min_timestamp = of_int_session["timestamp"].min()
+                max_timestamp = of_int_session["timestamp"].max()
+                duration = max_timestamp - min_timestamp
+
+            # If still NaN, cannot generate report
+            if np.isnan(duration):
+                message = "Skipping report generation. Duration is NaN (no valid data from subject or interviewer)."
+                console.log(message)
+                return message
 
         console.log(f"Interview duration: {duration:.2f} seconds")
         seconds_per_page = bin_size * bins_per_page

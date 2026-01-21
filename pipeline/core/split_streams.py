@@ -114,18 +114,29 @@ def split_streams(
     streams = []
     logger.info(f"Splitting streams for {video_path}...", extra={"markup": True})
 
+    # Check if this is an onsite interview
+    is_onsite = "onsite_interview" in str(video_path).lower()
+
     if not has_black_bars:
-        logger.info("No black bars detected. Skipping splitting streams.")
-        stream: VideoStream = VideoStream(
-            video_path=video_path, ir_role=default_role, vs_path=video_path
-        )
-        streams.append(stream)
-        return streams
+        if is_onsite:
+            # OBS onsite videos: no black bars but still split
+            logger.info("OBS onsite video detected - splitting without black bar removal")
+            black_bar_height = 0
+        else:
+            # Offsite/Zoom: no black bars means no splitting
+            logger.info("No black bars detected - skipping split")
+            stream: VideoStream = VideoStream(
+                video_path=video_path, ir_role=default_role, vs_path=video_path
+            )
+            streams.append(stream)
+            return streams
+    else:
+        # Has black bars - process normally
+        logger.info("Black bars detected - cropping and splitting")
+        if black_bar_height is None:
+            black_bar_height = 0
 
-    if black_bar_height is None:
-        black_bar_height = 0
-
-    # out_w:out_h:x:y
+    # Continue with splitting (only reached if should split)
     left_crop_params = f"iw/2:ih-{2 * black_bar_height}:0:{black_bar_height}"
     right_crop_params = f"iw/2:ih-{2 * black_bar_height}:iw/2:{black_bar_height}"
 

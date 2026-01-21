@@ -5,6 +5,7 @@ Helper functions for performing quick QC on transcripts.
 import ast
 import heapq
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -38,7 +39,8 @@ def get_transcript_to_process(
     query = f"""
         SELECT interview_file
         FROM interview_files
-        INNER JOIN interviews ON interview_files.interview_path = interviews.interview_path
+        INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+        INNER JOIN interviews ON interview_parts.interview_name = interviews.interview_name
         WHERE interviews.study_id = '{study_id}' AND
             interview_files.interview_file_tags LIKE '%%transcript%%' AND
             interview_files.interview_file NOT IN (
@@ -56,6 +58,66 @@ def get_transcript_to_process(
     return None
 
 
+# def transcript_to_df(transcript_path: Path) -> pd.DataFrame:
+#     """
+#     Reads a transcript file and returns a dataframe with the following columns:
+#     - start_time
+#     - end_time
+#     - speaker
+#     - text
+
+#     Expected format:
+#     ```test
+#         S1 00:00:02.350 Greetings, everyone. Welcome to the first session of the day.
+
+#         S2 00:00:06.000 Thank you for joining us.
+#     ```
+
+#     Args:
+#         transcript_path: Path, path to the transcript file
+
+#     Returns:
+#         pd.DataFrame
+#     """
+
+#     chunks = []
+
+#     with open(str(transcript_path), "r", encoding="utf-8") as f:
+#         lines = f.readlines()
+
+#     for line in lines:
+#         if not line.strip():
+#             continue
+
+#         try:
+#             stripped_line = line.strip()
+
+#             if stripped_line[0] != "S":
+#                 logger.warning(f"Skipped parsing line: '{stripped_line}'")
+#                 continue
+
+#             speaker, time, text = stripped_line.split(" ", 2)
+
+#             if speaker.endswith(":"):
+#                 speaker = speaker[:-1]
+#         except ValueError:
+#             logger.error(f"Failed to parse line: '{stripped_line}'")
+#             raise
+#         chunks.append(
+#             {
+#                 "start_time": time,
+#                 "speaker": speaker,
+#                 "text": text.strip(),
+#             }
+#         )
+
+#     df = pd.DataFrame(chunks)
+
+#     # end time is the start time of the next chunk
+#     df["end_time"] = df["start_time"].shift(-1)
+
+#     return df
+
 def transcript_to_df(transcript_path: Path) -> pd.DataFrame:
     """
     Reads a transcript file and returns a dataframe with the following columns:
@@ -64,12 +126,14 @@ def transcript_to_df(transcript_path: Path) -> pd.DataFrame:
     - speaker
     - text
 
-    Expected format:
-    ```test
-        S1 00:00:02.350 Greetings, everyone. Welcome to the first session of the day.
+    Expected format (dashboard format):
+```
+        S1: 00:00:02.350 Text goes here
+        S2: 00:00:06.000 More text here
+```
 
-        S2 00:00:06.000 Thank you for joining us.
-    ```
+    Speaker format: S1, S2, etc. (or any label with colon)
+    Timestamps in HH:MM:SS.fff format
 
     Args:
         transcript_path: Path, path to the transcript file
@@ -84,38 +148,55 @@ def transcript_to_df(transcript_path: Path) -> pd.DataFrame:
         lines = f.readlines()
 
     for line in lines:
-        if not line.strip():
+        line = line.strip()
+
+        # Skip empty lines
+        if not line:
             continue
 
+        # Try to parse dashboard format: speaker: HH:MM:SS.fff text
+        # Using a simple split approach that matches server.py logic
         try:
-            stripped_line = line.strip()
-
-            if stripped_line[0] != "S":
-                logger.warning(f"Skipped parsing line: '{stripped_line}'")
+            parts = line.split(" ", 2)
+            if len(parts) < 3:
+                logger.warning(f"Skipped parsing line (not enough parts): '{line[:80]}'")
                 continue
 
-            speaker, time, text = stripped_line.split(" ", 2)
+            speaker_raw = parts[0]
+            time = parts[1]
+            text = parts[2]
 
-            if speaker.endswith(":"):
-                speaker = speaker[:-1]
-        except ValueError:
-            logger.error(f"Failed to parse line: '{stripped_line}'")
-            raise
-        chunks.append(
-            {
+            # Validate timestamp format
+            try:
+                pd.to_datetime(time, format="%H:%M:%S.%f")
+            except ValueError:
+                logger.warning(f"Skipped parsing line (invalid timestamp): '{line[:80]}'")
+                continue
+
+            # Remove colon from speaker if present
+            if speaker_raw.endswith(":"):
+                speaker = speaker_raw[:-1]
+            else:
+                speaker = speaker_raw
+
+            chunks.append({
                 "start_time": time,
                 "speaker": speaker,
                 "text": text.strip(),
-            }
-        )
+            })
+        except Exception as e:
+            logger.warning(f"Skipped parsing line (error: {e}): '{line[:80]}'")
+            continue
 
     df = pd.DataFrame(chunks)
 
-    # end time is the start time of the next chunk
-    df["end_time"] = df["start_time"].shift(-1)
+    # Add end_time by shifting start_time
+    if not df.empty:
+        df["end_time"] = df["start_time"].shift(-1)
+        # Last row has no end time, fill with start time (or could use duration calculation)
+        df["end_time"].fillna(df["start_time"], inplace=True)
 
     return df
-
 
 def get_transcription_quick_qc(
     transcript_df: pd.DataFrame,

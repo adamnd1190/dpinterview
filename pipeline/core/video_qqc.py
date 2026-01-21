@@ -45,6 +45,9 @@ def get_file_to_process(
             JOIN interviews USING (interview_name)
             WHERE interviews.study_id = '{study_id}'
         ) AND fm.fm_duration IS NOT NULL
+        AND fm.fm_source_path IN (
+            SELECT fmv_source_path FROM ffprobe_metadata_video
+        )
         ORDER BY RANDOM()
         LIMIT 1;
     """

@@ -268,7 +268,7 @@ class FfprobeMetadata:
             duration = stream["duration"]
         else:
             # check if stream["tags"]["DURATION"] exists
-            if "DURATION" in stream["tags"]:
+            if "tags" in stream and "DURATION" in stream["tags"]:
                 duration = stream["tags"]["DURATION"]
             else:
                 duration = 0
@@ -315,7 +315,7 @@ class FfprobeMetadata:
                     {stream['index']},
                     '{stream['codec_name']}',
                     '{stream['codec_long_name']}',
-                    '{stream['profile']}',
+                    '{stream.get('profile', '')}',
                     '{stream['codec_type']}',
                     '{stream['codec_tag_string']}',
                     '{stream['codec_tag']}',
@@ -329,18 +329,18 @@ class FfprobeMetadata:
                     '{metric_or_null('sample_aspect_ratio', stream)}',
                     '{metric_or_null('display_aspect_ratio', stream)}',
                     '{stream['pix_fmt']}',
-                    {stream['level']},
+                    {stream.get('level', 0)},
                     '{metric_or_null('color_range', stream)}',
                     '{metric_or_null('chroma_location', stream)}',
                     '{stream['field_order']}',
-                    {stream['refs']},
+                    {stream.get('refs', 0)},
                     '{stream['r_frame_rate']}',
                     '{stream['avg_frame_rate']}',
                     '{stream['time_base']}',
                     {stream['start_pts']},
                     '{stream['start_time']}',
                     '{duration}',
-                    {stream['extradata_size']}
+                    {stream.get('extradata_size', 0)}
                 ) ON CONFLICT (fmv_source_path) DO NOTHING;
             """
         elif stream["codec_type"] == "audio":
@@ -373,7 +373,7 @@ class FfprobeMetadata:
                     {stream['index']},
                     '{stream['codec_name']}',
                     '{stream['codec_long_name']}',
-                    '{stream['profile']}',
+                    '{stream.get('profile', '')}',
                     '{stream['codec_type']}',
                     '{stream['codec_tag_string']}',
                     '{stream['codec_tag']}',
@@ -388,7 +388,7 @@ class FfprobeMetadata:
                     {stream['start_pts']},
                     '{stream['start_time']}',
                     '{duration}',
-                    {stream['extradata_size']}
+                    {stream.get('extradata_size', 0)}
                 ) ON CONFLICT (fma_source_path) DO NOTHING;
             """
         else:

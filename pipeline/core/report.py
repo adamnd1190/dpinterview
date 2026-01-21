@@ -120,7 +120,7 @@ def construct_report_path(config_file: Path, interview_name: str) -> Path:
         / data_dir
         / study_id
         / subject_id
-        / f"{interview_type}_interview"
+        / f"{interview_type}"
         / "processed"
         / "reports"
     )

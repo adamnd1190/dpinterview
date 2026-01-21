@@ -8,11 +8,11 @@ Allows POST requests to put QC results in a database.
 import sys
 from pathlib import Path
 
-file = Path("/home/dm2637/dev/av-pipeline-v2/pipeline/runners/01_fetch_video.py")
+file = Path("/home/dpinterview/pipeline/runners/01_fetch_video.py")
 parent = file.parent
 root = None
 for parent in file.parents:
-    if parent.name == "av-pipeline-v2":
+    if parent.name == "dpinterview":
         root = parent
 sys.path.append(str(root))
 
@@ -22,6 +22,7 @@ try:
 except ValueError:
     pass
 
+import glob
 import logging
 import re
 from datetime import datetime
@@ -269,6 +270,10 @@ def serve_file(file_path: str) -> flask.Response:
         return flask.send_file(file_path, mimetype="image/png")
     elif file_path.endswith(".txt"):
         return flask.send_file(file_path, mimetype="text/plain")
+    elif file_path.endswith(".mov"):
+        return flask.send_file(file_path, mimetype="video/mov")
+    elif file_path.endswith(".mkv"):
+        return flask.send_file(file_path, mimetype="video/mkv")
     else:
         return flask.Response("File type not supported.", status=400)
 
@@ -526,13 +531,63 @@ def watch_video(interview_name: str) -> flask.Response:
 
         interview_name = interview_name_r
 
-    video_query = f"""
-    SELECT interview_file FROM interview_files
-    LEFT JOIN interviews USING (interview_path)
-    WHERE interview_name = '{interview_name}' AND interview_file_tags LIKE '%%video%%'
+    # video_query = f"""
+    # SELECT interview_file FROM interview_files
+    # LEFT JOIN interviews USING (interview_path)
+    # WHERE interview_name = '{interview_name}' AND interview_file_tags LIKE '%%video%%'
+    # """
+
+    # video_file = db.fetch_record(config_file=config_file, query=video_query)
+
+    # if video_file is None:
+    #     return flask.Response("No video found for interview", status=404)
+
+    # return flask.redirect(f"/payload=[{video_file}]")  # type: ignore
+
+# First, try to get early exported video (downscaled for dashboard)
+    exported_video_query = f"""
+    SELECT asset_destination FROM exported_assets
+    WHERE interview_name = '{interview_name}'
+      AND asset_tag = 'early_video_export'
+      AND asset_destination != '/dev/null'
+    LIMIT 1;
     """
 
-    video_file = db.fetch_record(config_file=config_file, query=video_query)
+    video_file = db.fetch_record(config_file=config_file, query=exported_video_query)
+
+    if not video_file:
+        # Second, try to construct path to exported video in NAS video/ folder
+        # Pattern: /mnt/PREDiCTOR/PHOENIX/PROTECTED/{study}/{subject}/{type}/processed/{interview_name}/video/{filename}
+        video_folder_query = f"""
+        SELECT
+            '/mnt/PREDiCTOR/PHOENIX/PROTECTED/' || i.study_id || '/' ||
+            SPLIT_PART(i.interview_name, '-', 2) || '/' ||
+            i.interview_type || '/processed/' ||
+            i.interview_name || '/video/' as video_folder_path
+        FROM interviews i
+        WHERE i.interview_name = '{interview_name}';
+        """
+
+        video_folder = db.fetch_record(config_file=config_file, query=video_folder_query)
+
+        if video_folder:
+            # Look for video files in the folder (prioritize mp4/mkv over mov)
+            video_files = glob.glob(str(video_folder) + '*.mp4') + \
+                         glob.glob(str(video_folder) + '*.mkv') + \
+                         glob.glob(str(video_folder) + '*.mov')
+            if video_files:
+                video_file = video_files[0]  # Take the first video file found
+
+    if not video_file:
+        # Fall back to raw interview file if no exported video
+        video_query = f"""
+        SELECT interview_file FROM interview_files
+        INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+        INNER JOIN interviews ON interview_parts.interview_name = interviews.interview_name
+        WHERE interviews.interview_name = '{interview_name}' AND interview_file_tags LIKE '%%video%%'
+        LIMIT 1
+        """
+        video_file = db.fetch_record(config_file=config_file, query=video_query)
 
     if video_file is None:
         return flask.Response("No video found for interview", status=404)
@@ -788,4 +843,3 @@ def index() -> flask.Response:
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=45000, debug=True)
-
