@@ -126,6 +126,14 @@ if __name__ == "__main__":
         if black_bar_height is not None:
             black_bar_height = int(black_bar_height)
 
+        # Get video dimensions
+        width = file_to_process[3]
+        height = file_to_process[4]
+        if width is not None:
+            width = int(width)
+        if height is not None:
+            height = int(height)
+
         logger.info(
             f"[cyan]Splitting streams for {video_path}...",
             extra={"markup": True},
@@ -138,12 +146,18 @@ if __name__ == "__main__":
             f"Black bar height: {black_bar_height}",
             extra={"markup": True},
         )
+        logger.info(
+            f"Video dimensions: {width}x{height}",
+            extra={"markup": True},
+        )
 
         streams = split_streams.split_streams(
             video_path=video_path,
             has_black_bars=has_black_bars,
             black_bar_height=black_bar_height,
             config_file=config_file,
+            width=width,
+            height=height,
         )
         STREAMS_COUNTER += len(streams)
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def get_file_to_process(
     config_file: Path, study_id: str
-) -> Optional[Tuple[Path, bool, int]]:
+) -> Optional[Tuple[Path, bool, int, int, int]]:
     """
     Fetch a file to process from the database.
 
@@ -26,10 +26,15 @@ def get_file_to_process(
 
     Args:
         config_file (Path): Path to config file
+
+    Returns:
+        Tuple of (video_path, has_black_bars, black_bar_height, width, height) or None
     """
     sql_query = f"""
-        SELECT vqqc.video_path, vqqc.has_black_bars, vqqc.black_bar_height
+        SELECT vqqc.video_path, vqqc.has_black_bars, vqqc.black_bar_height,
+               fmv.fmv_width, fmv.fmv_height
         FROM video_quick_qc AS vqqc
+        LEFT JOIN ffprobe_metadata_video AS fmv ON vqqc.video_path = fmv.fmv_source_path
         LEFT JOIN (
             SELECT decrypted_files.destination_path, interview_files.interview_file_tags
             FROM interview_files
@@ -61,7 +66,15 @@ def get_file_to_process(
     if black_bar_height is not None:
         black_bar_height = int(black_bar_height)
 
-    return video_path, has_black_bars, black_bar_height
+    # Get video dimensions
+    width = result_df.iloc[0]["fmv_width"]
+    height = result_df.iloc[0]["fmv_height"]
+    if width is not None:
+        width = int(width)
+    if height is not None:
+        height = int(height)
+
+    return video_path, has_black_bars, black_bar_height, width, height
 
 
 def construct_stream_path(video_path: Path, role: InterviewRole, suffix: str) -> Path:
@@ -98,6 +111,8 @@ def split_streams(
     has_black_bars: bool,
     black_bar_height: Optional[int],
     config_file: Path,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
 ) -> List[VideoStream]:
     """
     Split video into streams
@@ -107,6 +122,8 @@ def split_streams(
         has_black_bars (bool): Whether video has black bars
         black_bar_height (Optional[int]): Height of black bars
         config_file (Path): Path to config file
+        width (Optional[int]): Video width from ffprobe_metadata_video
+        height (Optional[int]): Video height from ffprobe_metadata_video
     """
     config_params = utils.config(path=config_file, section="split-streams")
     default_role = InterviewRole.from_str(config_params["default_role"])
@@ -116,6 +133,69 @@ def split_streams(
 
     # Check if this is an onsite interview
     is_onsite = "onsite_interview" in str(video_path).lower()
+
+    # Check if this is a single-side zoom video (640x720 resolution)
+    # These videos have only subject side, need black bar removal but no split
+    is_single_side_zoom = (width == 640 and height == 720)
+
+    # Check if this is a dual-camera onsite video that needs splitting
+    # Dual-camera format has ~32:9 aspect ratio (e.g., 3840x1080)
+    # All other onsite videos are single-camera and should skip splitting
+    is_dual_camera_onsite = False
+    if is_onsite and width is not None and height is not None and height > 0:
+        aspect_ratio = width / height
+        # Dual-camera ratio is around 3.5:1 (32:9), allow some tolerance
+        is_dual_camera_onsite = 3.0 <= aspect_ratio <= 4.0
+
+    # Single-camera onsite: any onsite video that's NOT dual-camera format
+    is_single_camera_onsite = is_onsite and not is_dual_camera_onsite
+
+    if is_single_side_zoom or is_single_camera_onsite:
+        if is_single_side_zoom:
+            logger.info(f"Single-side zoom video detected ({width}x{height}) - creating subject video only")
+        else:
+            logger.info(f"Single-camera onsite video detected ({width}x{height}) - creating subject video only")
+        subject_role = InterviewRole.SUBJECT
+
+        if black_bar_height is None:
+            black_bar_height = 0
+
+        # Crop params: full width, remove black bars from top and bottom
+        crop_params = f"iw:ih-{2 * black_bar_height}:0:{black_bar_height}"
+
+        stream_file_path = construct_stream_path(
+            video_path=video_path, role=subject_role, suffix="mp4"
+        )
+
+        with Timer() as timer:
+            with utils.get_progress_bar() as progress:
+                task = progress.add_task("Creating subject stream", total=1)
+                progress.update(task, description=f"Creating {subject_role.value} stream")
+
+                ffmpeg.crop_video(
+                    source=video_path,
+                    target=stream_file_path,
+                    crop_params=crop_params,
+                    progress=progress,
+                )
+                orchestrator.fix_permissions(
+                    config_file=config_file, file_path=stream_file_path
+                )
+                progress.update(task, advance=1)
+
+        logger.info(
+            f"Created {subject_role.value} stream: {stream_file_path} ({timer.duration})",
+            extra={"markup": True},
+        )
+
+        stream: VideoStream = VideoStream(
+            video_path=video_path,
+            ir_role=subject_role,
+            vs_path=stream_file_path,
+            vs_process_time=timer.duration,
+        )
+        streams.append(stream)
+        return streams
 
     if not has_black_bars:
         if is_onsite:

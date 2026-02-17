@@ -37,6 +37,9 @@ from pipeline import orchestrator
 
 MODULE_NAME = "cleanup_interview"
 logger = logging.getLogger(MODULE_NAME)
+
+# Temp root for intermediate processed data
+TEMP_ROOT = Path("/home/dpinterview/temp_root")
 logargs = {
     "level": logging.INFO,
     "format": "%(message)s",
@@ -54,11 +57,11 @@ DATABASE_TABLES = [
     "load_openface",            # References openface_qc
     "openface_qc",              # References openface
     "openface",                 # References video_streams
-    "video_streams",            # References interview_files
-    "video_qqc",                # References interview_files
+    "video_streams",            # References video_quick_qc (via video_path)
+    "video_qqc",                # video_quick_qc references decrypted_files
+    "decrypted_files",          # References interview_files
     "transcript_quick_qc",      # References interview_files
     "llm_speaker_identification",  # References transcript_files
-    "llm_language_identification", # References transcript_files
     "transcript_files",         # References files
     "interview_files",          # References interview_parts and files
     "exported_assets",          # References interview_parts
@@ -127,6 +130,33 @@ def normalize_interview_name(interview_name: str) -> dict:
         "pattern": interview_name,
         "format": "exact"
     }
+
+
+def get_flexible_path_pattern(interview_name: str) -> str:
+    """
+    Generate a flexible LIKE pattern for matching paths that contain interview name variants.
+
+    For example, PREDiCTOR-P0076MA-offsiteInterview_MD-day0215 becomes:
+    %PREDiCTOR-P0076MA-offsiteInterview%day0215%
+
+    This matches variants like:
+    - PREDiCTOR-P0076MA-offsiteInterview_video_subject-day0215
+    - PREDiCTOR-P0076MA-offsiteInterview_video_interviewer-day0215
+    - PREDiCTOR-P0076MA-offsiteInterview_MD-day0215
+    """
+    info = normalize_interview_name(interview_name)
+
+    if info["format"] == "dpdash":
+        # Extract the interview type prefix (e.g., "offsiteInterview" from "offsiteInterview_MD")
+        interview_type_prefix = info["interview_type"].split("_")[0]
+        day_num = info["day"]
+        # Pattern: %STUDY-SUBJECT-TYPE_PREFIX%dayXXXX%
+        return f"%{info['study_id']}-{info['subject_id']}-{interview_type_prefix}%day{day_num:04d}%"
+    elif info["format"] == "raw":
+        day_num = info["day"]
+        return f"%{info['study_id']}-{info['subject_id']}%day{day_num:04d}%"
+    else:
+        return f"%{interview_name}%"
 
 
 def find_related_interviews(config_file: Path, interview_name: str) -> list:
@@ -307,6 +337,24 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 table_summary.add_row(tbl, str(count), "")
                 total_records += count
             continue
+        elif tbl == "decrypted_files":
+            # decrypted_files.source_path references interview_files.interview_file
+            query = f"""
+                SELECT COUNT(*) as count
+                FROM decrypted_files
+                WHERE source_path IN (
+                    SELECT interview_file FROM interview_files
+                    INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                    WHERE interview_parts.interview_name IN ('{interview_list}')
+                );
+            """
+            result = db.execute_sql(config_file=config_file, query=query)
+            count = result.iloc[0]["count"] if not result.empty else 0
+
+            if count > 0:
+                table_summary.add_row(tbl, str(count), "")
+                total_records += count
+            continue
         elif tbl == "exported_assets":
             # Has interview_name column directly
             query = f"""
@@ -322,8 +370,9 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 total_records += count
             continue
         elif tbl == "ffprobe_metadata_audio":
-            # Path-based PK: fma_source_path contains interview name
-            conditions = " OR ".join([f"fma_source_path LIKE '%{name}%'" for name in interview_list.split("', '")])
+            # Path-based PK: fma_source_path contains interview name variants
+            # Use flexible pattern to match video_subject, video_interviewer, MD, etc.
+            conditions = " OR ".join([f"fma_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             query = f"""
                 SELECT COUNT(*) as count
                 FROM ffprobe_metadata_audio
@@ -345,8 +394,8 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 total_records += count
             continue
         elif tbl == "ffprobe_metadata_video":
-            # Path-based PK: fmv_source_path contains interview name
-            conditions = " OR ".join([f"fmv_source_path LIKE '%{name}%'" for name in interview_list.split("', '")])
+            # Path-based PK: fmv_source_path contains interview name variants
+            conditions = " OR ".join([f"fmv_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             query = f"""
                 SELECT COUNT(*) as count
                 FROM ffprobe_metadata_video
@@ -368,8 +417,8 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 total_records += count
             continue
         elif tbl == "ffprobe_metadata":
-            # Path-based PK: fm_source_path contains interview name
-            conditions = " OR ".join([f"fm_source_path LIKE '%{name}%'" for name in interview_list.split("', '")])
+            # Path-based PK: fm_source_path contains interview name variants
+            conditions = " OR ".join([f"fm_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             query = f"""
                 SELECT COUNT(*) as count
                 FROM ffprobe_metadata
@@ -391,12 +440,22 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 total_records += count
             continue
         elif tbl == "openface":
-            # Path-based PK: vs_path contains interview name
-            conditions = " OR ".join([f"vs_path LIKE '%{name}%'" for name in interview_list.split("', '")])
+            # openface.vs_path references video_streams.vs_path
+            # Follow the FK chain: video_streams -> decrypted_files -> interview_files -> interview_parts
             query = f"""
                 SELECT COUNT(*) as count
                 FROM openface
-                WHERE {conditions};
+                WHERE vs_path IN (
+                    SELECT vs_path FROM video_streams
+                    WHERE video_path IN (
+                        SELECT destination_path FROM decrypted_files
+                        WHERE source_path IN (
+                            SELECT interview_file FROM interview_files
+                            INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                            WHERE interview_parts.interview_name IN ('{interview_list}')
+                        )
+                    )
+                );
             """
             result = db.execute_sql(config_file=config_file, query=query)
             count = result.iloc[0]["count"] if not result.empty else 0
@@ -405,7 +464,17 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 sample_query = f"""
                     SELECT vs_path
                     FROM openface
-                    WHERE {conditions}
+                    WHERE vs_path IN (
+                        SELECT vs_path FROM video_streams
+                        WHERE video_path IN (
+                            SELECT destination_path FROM decrypted_files
+                            WHERE source_path IN (
+                                SELECT interview_file FROM interview_files
+                                INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                                WHERE interview_parts.interview_name IN ('{interview_list}')
+                            )
+                        )
+                    )
                     LIMIT 1;
                 """
                 sample_result = db.execute_sql(config_file=config_file, query=sample_query)
@@ -413,10 +482,57 @@ def show_database_preview(config_file: Path, interview_names: list, table: str =
                 table_summary.add_row(tbl, str(count), sample)
                 total_records += count
             continue
-        elif tbl in ["openface_qc", "manual_qc", "pdf_reports",
-                     "llm_speaker_identification", "llm_language_identification"]:
-            # These might reference interview_name or interview_path differently
-            # Try interview_name first
+        elif tbl == "openface_qc":
+            # openface_qc.of_processed_path references openface.of_processed_path
+            # Follow the FK chain through openface
+            query = f"""
+                SELECT COUNT(*) as count
+                FROM openface_qc
+                WHERE of_processed_path IN (
+                    SELECT of_processed_path FROM openface
+                    WHERE vs_path IN (
+                        SELECT vs_path FROM video_streams
+                        WHERE video_path IN (
+                            SELECT destination_path FROM decrypted_files
+                            WHERE source_path IN (
+                                SELECT interview_file FROM interview_files
+                                INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                                WHERE interview_parts.interview_name IN ('{interview_list}')
+                            )
+                        )
+                    )
+                );
+            """
+            result = db.execute_sql(config_file=config_file, query=query)
+            count = result.iloc[0]["count"] if not result.empty else 0
+
+            if count > 0:
+                sample_query = f"""
+                    SELECT of_processed_path
+                    FROM openface_qc
+                    WHERE of_processed_path IN (
+                        SELECT of_processed_path FROM openface
+                        WHERE vs_path IN (
+                            SELECT vs_path FROM video_streams
+                            WHERE video_path IN (
+                                SELECT destination_path FROM decrypted_files
+                                WHERE source_path IN (
+                                    SELECT interview_file FROM interview_files
+                                    INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                                    WHERE interview_parts.interview_name IN ('{interview_list}')
+                                )
+                            )
+                        )
+                    )
+                    LIMIT 1;
+                """
+                sample_result = db.execute_sql(config_file=config_file, query=sample_query)
+                sample = Path(sample_result.iloc[0]["of_processed_path"]).name if not sample_result.empty else ""
+                table_summary.add_row(tbl, str(count), sample)
+                total_records += count
+            continue
+        elif tbl in ["manual_qc", "pdf_reports", "llm_speaker_identification"]:
+            # These have interview_name column
             try:
                 query = f"""
                     SELECT COUNT(*) as count
@@ -525,6 +641,16 @@ def delete_database_records(config_file: Path, interview_names: list, table: str
                     )
                 );
             """)
+        elif tbl == "decrypted_files":
+            # decrypted_files.source_path references interview_files.interview_file
+            queries.append(f"""
+                DELETE FROM decrypted_files
+                WHERE source_path IN (
+                    SELECT interview_file FROM interview_files
+                    INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                    WHERE interview_parts.interview_name IN ('{interview_list}')
+                );
+            """)
         elif tbl == "exported_assets":
             # Has interview_name column directly
             queries.append(f"""
@@ -532,33 +658,63 @@ def delete_database_records(config_file: Path, interview_names: list, table: str
                 WHERE interview_name IN ('{interview_list}');
             """)
         elif tbl == "ffprobe_metadata_audio":
-            # Path-based PK: fma_source_path contains interview name
-            # Build LIKE conditions for each interview
-            conditions = " OR ".join([f"fma_source_path LIKE '%{name}%'" for name in interview_names])
+            # Path-based PK: fma_source_path contains interview name variants
+            # Use flexible pattern to match video_subject, video_interviewer, MD, etc.
+            conditions = " OR ".join([f"fma_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             queries.append(f"""
                 DELETE FROM ffprobe_metadata_audio
                 WHERE {conditions};
             """)
         elif tbl == "ffprobe_metadata_video":
-            # Path-based PK: fmv_source_path contains interview name
-            conditions = " OR ".join([f"fmv_source_path LIKE '%{name}%'" for name in interview_names])
+            # Path-based PK: fmv_source_path contains interview name variants
+            conditions = " OR ".join([f"fmv_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             queries.append(f"""
                 DELETE FROM ffprobe_metadata_video
                 WHERE {conditions};
             """)
         elif tbl == "ffprobe_metadata":
-            # Path-based PK: fm_source_path contains interview name
-            conditions = " OR ".join([f"fm_source_path LIKE '%{name}%'" for name in interview_names])
+            # Path-based PK: fm_source_path contains interview name variants
+            conditions = " OR ".join([f"fm_source_path LIKE '{get_flexible_path_pattern(name)}'" for name in interview_names])
             queries.append(f"""
                 DELETE FROM ffprobe_metadata
                 WHERE {conditions};
             """)
         elif tbl == "openface":
-            # Path-based PK: vs_path contains interview name (references video_streams)
-            conditions = " OR ".join([f"vs_path LIKE '%{name}%'" for name in interview_names])
+            # openface.vs_path references video_streams.vs_path
+            # Follow the FK chain: video_streams -> decrypted_files -> interview_files -> interview_parts
             queries.append(f"""
                 DELETE FROM openface
-                WHERE {conditions};
+                WHERE vs_path IN (
+                    SELECT vs_path FROM video_streams
+                    WHERE video_path IN (
+                        SELECT destination_path FROM decrypted_files
+                        WHERE source_path IN (
+                            SELECT interview_file FROM interview_files
+                            INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                            WHERE interview_parts.interview_name IN ('{interview_list}')
+                        )
+                    )
+                );
+            """)
+        elif tbl == "openface_qc":
+            # openface_qc.of_processed_path references openface.of_processed_path
+            # Follow the FK chain through openface
+            queries.append(f"""
+                DELETE FROM openface_qc
+                WHERE of_processed_path IN (
+                    SELECT of_processed_path FROM openface
+                    WHERE vs_path IN (
+                        SELECT vs_path FROM video_streams
+                        WHERE video_path IN (
+                            SELECT destination_path FROM decrypted_files
+                            WHERE source_path IN (
+                                SELECT interview_file FROM interview_files
+                                INNER JOIN interview_parts ON interview_files.interview_path = interview_parts.interview_path
+                                WHERE interview_parts.interview_name IN ('{interview_list}')
+                            )
+                        )
+                    )
+                );
             """)
         else:
             # Default: Try interview_name column
@@ -575,20 +731,44 @@ def delete_database_records(config_file: Path, interview_names: list, table: str
         logger.info("\n[bold yellow]DRY RUN: No changes made to database[/bold yellow]", extra={"markup": True})
     else:
         logger.info("Executing deletions...")
-        try:
-            db.execute_queries(config_file=config_file, queries=queries, show_commands=False)
-            logger.info("[bold green]✓ Database records deleted successfully![/bold green]", extra={"markup": True})
-        except Exception as e:
-            logger.error(f"Error deleting records: {e}")
-            raise
+        success_count = 0
+        skip_count = 0
+        for i, query in enumerate(queries):
+            try:
+                # Pass on_failure=None to raise exception instead of sys.exit(1)
+                db.execute_queries(config_file=config_file, queries=[query], show_commands=False, on_failure=None)
+                success_count += 1
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Skip non-existent tables gracefully
+                if "does not exist" in error_msg or "relation" in error_msg:
+                    # Extract table name from query for logging
+                    table_match = query.strip().split("FROM")[1].split()[0] if "FROM" in query else "unknown"
+                    logger.warning(f"Skipping non-existent table: {table_match}")
+                    skip_count += 1
+                else:
+                    logger.error(f"Error executing query: {e}")
+                    raise
+        logger.info(f"[bold green]✓ Database records deleted successfully! ({success_count} queries executed, {skip_count} skipped)[/bold green]", extra={"markup": True})
 
 
 def find_processed_folders(data_root: Path, interview_names: list):
     """
     Find all processed folders for the interviews.
+
+    Handles both structures:
+    - data_root/PROTECTED/STUDY/SUBJECT/TYPE/processed/INTERVIEW_NAME/
+    - temp_root/PHOENIX/PROTECTED/STUDY/SUBJECT/TYPE/processed/INTERVIEW_NAME/
     """
 
     folders = []
+
+    # Determine base paths to search (handles both PROTECTED and PHOENIX/PROTECTED structures)
+    base_paths = []
+    if (data_root / "PROTECTED").exists():
+        base_paths.append(data_root / "PROTECTED")
+    if (data_root / "PHOENIX" / "PROTECTED").exists():
+        base_paths.append(data_root / "PHOENIX" / "PROTECTED")
 
     for interview_name in interview_names:
         # Parse interview name to build path
@@ -605,13 +785,13 @@ def find_processed_folders(data_root: Path, interview_names: list):
                 f"{interview_type.lower()}_interview",
             ]
 
-            for type_var in type_variants:
-                # Pattern: PROTECTED/STUDY/SUBJECT/TYPE/processed/INTERVIEW_NAME/
-                pattern_path = data_root / "PROTECTED" / "*" / subject_id / type_var / "processed" / interview_name
-                matches = list(data_root.glob(f"PROTECTED/*/{subject_id}/{type_var}/processed/{interview_name}*"))
-                folders.extend(matches)
+            for base_path in base_paths:
+                for type_var in type_variants:
+                    # Pattern: BASE/STUDY/SUBJECT/TYPE/processed/INTERVIEW_NAME/
+                    matches = list(base_path.glob(f"*/{subject_id}/{type_var}/processed/{interview_name}*"))
+                    folders.extend(matches)
 
-        # Also try direct glob search
+        # Also try direct glob search in entire data_root
         direct_matches = list(data_root.glob(f"**/{interview_name}*"))
         for match in direct_matches:
             if "processed" in str(match):
@@ -760,21 +940,33 @@ def main():
 
     if delete_fs:
         data_root = orchestrator.get_data_root(config_file=config_file, enforce_real=True)
-        logger.info(f"Searching in: {data_root}")
 
-        folders = find_processed_folders(data_root, related_interviews)
+        # Search in both data_root and temp_root
+        search_paths = [data_root]
+        if TEMP_ROOT.exists():
+            search_paths.append(TEMP_ROOT)
 
-        if folders:
+        all_folders = []
+        for search_path in search_paths:
+            logger.info(f"Searching in: {search_path}")
+            folders = find_processed_folders(search_path, related_interviews)
+            all_folders.extend(folders)
+
+        # Deduplicate
+        all_folders = list(set(all_folders))
+        all_folders.sort()
+
+        if all_folders:
             console.print("\n[bold yellow]Preview: Processed folders[/bold yellow]")
-            count = show_filesystem_preview(folders)
+            count = show_filesystem_preview(all_folders)
 
             if count > 0:
                 if dry_run:
-                    delete_filesystem_folders(folders, dry_run=True)
+                    delete_filesystem_folders(all_folders, dry_run=True)
                 else:
                     confirmation = Prompt.ask("\n[bold red]Type 'delete' to confirm[/bold red]")
                     if confirmation.lower() == "delete":
-                        delete_filesystem_folders(folders, dry_run=False)
+                        delete_filesystem_folders(all_folders, dry_run=False)
                     else:
                         logger.info("Cancelled.")
         else:
